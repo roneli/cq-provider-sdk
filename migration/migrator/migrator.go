@@ -13,7 +13,7 @@ import (
 	"github.com/cloudquery/cq-provider-sdk/provider/schema"
 
 	"github.com/golang-migrate/migrate/v4"
-	_ "github.com/golang-migrate/migrate/v4/database/postgres"
+	mpg "github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/hashicorp/go-hclog"
@@ -90,10 +90,18 @@ type Migrator struct {
 	versionMapper map[string]uint
 	versions      version.Collection
 
-	postHook func(context.Context) error
+	preHook  hookFunc
+	postHook hookFuncWithError
 }
 
-func New(log hclog.Logger, dt schema.DialectType, migrationFiles map[string]map[string][]byte, dsnURI, providerName string, postHook func(context.Context) error) (*Migrator, error) {
+type Option func(*Migrator)
+
+type (
+	hookFunc          func(context.Context) error
+	hookFuncWithError func(context.Context, error) error
+)
+
+func New(log hclog.Logger, dt schema.DialectType, migrationFiles map[string]map[string][]byte, dsnURI, providerName string, opts ...Option) (*Migrator, error) {
 	versionMapper := make(map[string]uint)
 	versions := make(version.Collection, 0)
 	mm := afero.NewMemMapFs()
@@ -105,6 +113,10 @@ func New(log hclog.Logger, dt schema.DialectType, migrationFiles map[string]map[
 			return nil, err
 		}
 		raw := strings.Split(strings.TrimSuffix(strings.TrimSuffix(k, ".up.sql"), ".down.sql"), "_")
+		if len(raw) == 1 {
+			return nil, fmt.Errorf("invalid migration filename %q: should be in format <int>_v<version>.up|down.sql", k)
+		}
+
 		// add version once to mapper, up/down should have same migration number anyway
 		if _, ok := versionMapper[raw[1]]; !ok {
 			versionMapper[raw[1]] = cast.ToUint(raw[0])
@@ -130,11 +142,11 @@ func New(log hclog.Logger, dt schema.DialectType, migrationFiles map[string]map[
 		u.RawQuery += fmt.Sprintf("x-migrations-table=%s_schema_migrations", providerName)
 	}
 	m, err := migrate.NewWithSourceInstance(providerName, driver, u.String())
-
 	if err != nil {
-		return nil, err
+		return nil, convertMigrateError(u.String(), err)
 	}
-	return &Migrator{
+
+	mg := &Migrator{
 		log:           log,
 		provider:      providerName,
 		dsn:           dsnURI,
@@ -143,28 +155,42 @@ func New(log hclog.Logger, dt schema.DialectType, migrationFiles map[string]map[
 		driver:        driver,
 		versionMapper: versionMapper,
 		versions:      versions,
-		postHook:      postHook,
-	}, nil
+		preHook:       func(_ context.Context) error { return nil },
+		postHook:      func(_ context.Context, err error) error { return err },
+	}
+	for _, o := range opts {
+		o(mg)
+	}
+	return mg, nil
 }
 
-func (m *Migrator) callPostHook(ctx context.Context) error {
-	if m.postHook == nil {
-		return nil
+func WithPreHook(fn hookFunc) Option {
+	return func(m *Migrator) {
+		m.preHook = fn
 	}
-	return m.postHook(ctx)
+}
+
+func WithPostHook(fn hookFuncWithError) Option {
+	return func(m *Migrator) {
+		m.postHook = fn
+	}
 }
 
 func (m *Migrator) Close() error {
+	if m.m == nil {
+		return nil
+	}
+
 	_, dbErr := m.m.Close()
 	return dbErr
 }
 
 func (m *Migrator) UpgradeProvider(version string) (retErr error) {
+	if err := m.preHook(context.Background()); err != nil {
+		return err
+	}
 	defer func() {
-		if retErr != nil {
-			return
-		}
-		retErr = m.callPostHook(context.Background())
+		retErr = m.postHook(context.Background(), retErr)
 	}()
 
 	if version == Latest {
@@ -180,11 +206,11 @@ func (m *Migrator) UpgradeProvider(version string) (retErr error) {
 }
 
 func (m *Migrator) DowngradeProvider(version string) (retErr error) {
+	if err := m.preHook(context.Background()); err != nil {
+		return err
+	}
 	defer func() {
-		if retErr != nil {
-			return
-		}
-		retErr = m.callPostHook(context.Background())
+		retErr = m.postHook(context.Background(), retErr)
 	}()
 
 	if version == Down { // Used in testing
@@ -201,11 +227,11 @@ func (m *Migrator) DowngradeProvider(version string) (retErr error) {
 }
 
 func (m *Migrator) DropProvider(ctx context.Context, schema map[string]*schema.Table) (retErr error) {
+	if err := m.preHook(ctx); err != nil {
+		return err
+	}
 	defer func() {
-		if retErr != nil {
-			return
-		}
-		retErr = m.callPostHook(context.Background())
+		retErr = m.postHook(ctx, retErr)
 	}()
 
 	// we don't use go-migrate's drop since its too violent and it will remove all tables of other providers,
@@ -227,9 +253,14 @@ func (m *Migrator) DropProvider(ctx context.Context, schema map[string]*schema.T
 			return err
 		}
 	}
+
+	if _, dbErr := m.m.Close(); dbErr != nil {
+		m.log.Warn("error closing migrator", "error", dbErr)
+	}
+
 	newM, err := migrate.NewWithSourceInstance(m.provider, m.driver, m.migratorUrl.String())
 	if err != nil {
-		return err
+		return convertMigrateError(m.migratorUrl.String(), err)
 	}
 	// reset migrator
 	m.m = newM
@@ -247,11 +278,11 @@ func (m *Migrator) Version() (string, bool, error) {
 }
 
 func (m *Migrator) SetVersion(requestedVersion string) (retErr error) {
+	if err := m.preHook(context.Background()); err != nil {
+		return err
+	}
 	defer func() {
-		if retErr != nil {
-			return
-		}
-		retErr = m.callPostHook(context.Background())
+		retErr = m.postHook(context.Background(), retErr)
 	}()
 
 	mv, err := m.FindLatestMigration(requestedVersion)
@@ -309,4 +340,28 @@ func dropTables(ctx context.Context, conn *pgx.Conn, table *schema.Table) error 
 		}
 	}
 	return nil
+}
+
+func convertMigrateError(dsnURI string, err error) error {
+	if err == nil {
+		return err
+	}
+
+	// https://github.com/golang-migrate/migrate/issues/696
+	if err != mpg.ErrNoSchema && !strings.Contains(err.Error(), `"current_schema": converting NULL to string`) {
+		return err
+	}
+
+	const errFmt = "CURRENT_SCHEMA seems empty, possibly due to empty search_path. Try `GRANT ALL PRIVILEGES ON %s TO <user>`"
+
+	u, err2 := dsn.ParseConnectionString(dsnURI)
+	if err2 != nil {
+		return fmt.Errorf(errFmt, `<schema>`)
+	}
+	p := u.Query().Get("search_path")
+	if p == "" {
+		p = "public"
+	}
+
+	return fmt.Errorf(errFmt, p)
 }
