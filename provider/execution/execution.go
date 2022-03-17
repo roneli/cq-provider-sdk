@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -100,37 +101,47 @@ func (e TableExecutor) withTable(t *schema.Table) *TableExecutor {
 // doMultiplexResolve resolves table with multiplexed clients appending all diagnostics returned from each multiplex.
 func (e TableExecutor) doMultiplexResolve(ctx context.Context, clients []schema.ClientMeta) (uint64, diag.Diagnostics) {
 	var (
-		diagsChan      = make(chan diag.Diagnostics)
-		totalResources uint64
-	)
-	var (
-		allDiags    diag.Diagnostics
-		doneClients = 0
+		diagsChan       = make(chan diag.Diagnostics)
+		totalResources  uint64
+		allDiags        diag.Diagnostics
+		doneClients     = 0
+		numberOfClients = 0
 	)
 	logger := clients[0].Logger()
 	logger.Debug("multiplexing client", "count", len(clients), "table", e.Table.Name)
-	defer close(diagsChan)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for dd := range diagsChan {
+			allDiags = allDiags.Add(dd)
+			doneClients++
+		}
+		logger.Debug("multiplexed client finished", "done", doneClients, "total", numberOfClients, "table", e.Table.Name)
+	}()
+
+	wg := &sync.WaitGroup{}
 	for _, client := range clients {
 		// we can only limit on a granularity of a top table otherwise we can get deadlock
 		if err := e.goroutinesSem.Acquire(ctx, 1); err != nil {
-			return totalResources, allDiags.Add(ClassifyError(err, diag.WithResourceName(e.ResourceName)))
+			diagsChan <- ClassifyError(err, diag.WithResourceName(e.ResourceName))
+			break
 		}
+		logger.Debug("creating multiplex client new client")
+		numberOfClients++
+		wg.Add(1)
 		go func(c schema.ClientMeta, diags chan<- diag.Diagnostics) {
 			defer e.goroutinesSem.Release(1)
+			defer wg.Done()
 			count, resolveDiags := e.callTableResolve(ctx, c, nil)
 			atomic.AddUint64(&totalResources, count)
 			diagsChan <- resolveDiags
 		}(client, diagsChan)
 	}
+	wg.Wait()
+	close(diagsChan)
+	<-done
 
-	for dd := range diagsChan {
-		allDiags = allDiags.Add(dd)
-		doneClients++
-		logger.Debug("multiplexed client finished", "done", doneClients, "total", len(clients), "table", e.Table.Name)
-		if doneClients >= len(clients) {
-			break
-		}
-	}
 	logger.Debug("table multiplex resolve completed", "table", e.Table.Name)
 	return totalResources, allDiags
 }
@@ -164,7 +175,12 @@ func (e TableExecutor) cleanupStaleData(ctx context.Context, client schema.Clien
 	if e.Table.DeleteFilter != nil {
 		filters = append(filters, e.Table.DeleteFilter(client, parent)...)
 	}
-	return e.Db.RemoveStaleData(ctx, e.Table, e.executionStart, filters)
+	if err := e.Db.RemoveStaleData(ctx, e.Table, e.executionStart, filters); err != nil {
+		client.Logger().Warn("failed to clean table stale data", "table", e.Table.Name, "last_update", e.executionStart)
+		return err
+	}
+	client.Logger().Debug("cleaned table stale data successfully", "table", e.Table.Name, "last_update", e.executionStart)
+	return nil
 }
 
 // callTableResolve does the actual resolving of the table calling the root table's resolver and for each returned resource resolves its columns and relations.
