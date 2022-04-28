@@ -45,10 +45,12 @@ type TableExecutor struct {
 	columns [2]schema.ColumnList
 	// goroutinesSem to limit number of goroutines (clients fetched) concurrently
 	goroutinesSem *semaphore.Weighted
+	// timeout for each parent resource resolve call
+	timeout time.Duration
 }
 
 // NewTableExecutor creates a new TableExecutor for given schema.Table
-func NewTableExecutor(resourceName string, db Storage, logger hclog.Logger, table *schema.Table, extraFields, metadata map[string]interface{}, classifier ErrorClassifier, goroutinesSem *semaphore.Weighted) TableExecutor {
+func NewTableExecutor(resourceName string, db Storage, logger hclog.Logger, table *schema.Table, extraFields, metadata map[string]interface{}, classifier ErrorClassifier, goroutinesSem *semaphore.Weighted, timeout time.Duration) TableExecutor {
 
 	var classifiers = []ErrorClassifier{defaultErrorClassifier}
 	if classifier != nil {
@@ -68,6 +70,7 @@ func NewTableExecutor(resourceName string, db Storage, logger hclog.Logger, tabl
 		executionStart: time.Now().Add(executionJitter),
 		columns:        c,
 		goroutinesSem:  goroutinesSem,
+		timeout:        timeout,
 	}
 }
 
@@ -77,6 +80,12 @@ func (e TableExecutor) Resolve(ctx context.Context, meta schema.ClientMeta) (uin
 		if clients := e.Table.Multiplex(meta); len(clients) > 0 {
 			return e.doMultiplexResolve(ctx, clients)
 		}
+	}
+
+	if e.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, e.timeout)
+		defer cancel()
 	}
 	return e.callTableResolve(ctx, meta, nil)
 }
@@ -133,9 +142,15 @@ func (e TableExecutor) doMultiplexResolve(ctx context.Context, clients []schema.
 		go func(c schema.ClientMeta, diags chan<- diag.Diagnostics) {
 			defer e.goroutinesSem.Release(1)
 			defer wg.Done()
+			if e.timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, e.timeout)
+				defer cancel()
+			}
+
 			count, resolveDiags := e.callTableResolve(ctx, c, nil)
 			atomic.AddUint64(&totalResources, count)
-			diagsChan <- resolveDiags
+			diags <- resolveDiags
 		}(client, diagsChan)
 	}
 	wg.Wait()
@@ -212,7 +227,7 @@ func (e TableExecutor) callTableResolve(ctx context.Context, client schema.Clien
 		}()
 		if err := e.Table.Resolver(ctx, client, parent, res); err != nil {
 			if e.Table.IgnoreError != nil && e.Table.IgnoreError(err) {
-				client.Logger().Warn("ignored an error", "err", err, "table", e.Table.Name)
+				client.Logger().Debug("ignored an error", "err", err, "table", e.Table.Name)
 				err = diag.NewBaseError(err, diag.RESOLVING, diag.WithSeverity(diag.IGNORE), diag.WithSummary("table %q resolver ignored error", e.Table.Name))
 			}
 			resolverErr = e.handleResolveError(client, parent, err)
@@ -232,8 +247,12 @@ func (e TableExecutor) callTableResolve(ctx context.Context, client schema.Clien
 	}
 	// check if channel iteration stopped because of resolver failure
 	if resolverErr != nil {
-		client.Logger().Error("received resolve resources error", "table", e.Table.Name, "error", resolverErr)
-		return 0, diags.Add(resolverErr)
+		diags = diags.Add(resolverErr)
+
+		if diag.FromError(resolverErr, diag.INTERNAL).HasErrors() {
+			client.Logger().Error("received resolve resources error", "table", e.Table.Name, "error", resolverErr)
+			return 0, diags
+		}
 	}
 	// Print only parent resources
 	if parent == nil {
@@ -255,9 +274,10 @@ func (e TableExecutor) resolveResources(ctx context.Context, meta schema.ClientM
 	for _, o := range objects {
 		resource := schema.NewResourceData(e.Db.Dialect(), e.Table, parent, o, e.metadata, e.executionStart)
 		// Before inserting resolve all table column resolvers
-		if err := e.resolveResourceValues(ctx, meta, resource); err != nil {
-			e.Logger.Warn("skipping failed resolved resource", "reason", err.Error())
-			diags = diags.Add(err)
+		resolveDiags := e.resolveResourceValues(ctx, meta, resource)
+		diags = diags.Add(resolveDiags)
+		if resolveDiags.HasErrors() {
+			e.Logger.Warn("skipping failed resolved resource", "reason", resolveDiags.Error())
 			continue
 		}
 		resources = append(resources, resource)
@@ -285,6 +305,9 @@ func (e TableExecutor) resolveResources(ctx context.Context, meta schema.ClientM
 // saveToStorage copies resource data to source, it has ways of inserting, first it tries the most performant CopyFrom if that does work it bulk inserts,
 // finally it inserts each resource separately, appending errors for each failed resource, only successfully inserted resources are returned
 func (e TableExecutor) saveToStorage(ctx context.Context, resources schema.Resources, shouldCascade bool) (schema.Resources, diag.Diagnostics) {
+	if l := len(resources); l > 0 {
+		e.Logger.Debug("storing resources", "table", resources.TableName(), "count", l)
+	}
 	err := e.Db.CopyFrom(ctx, resources, shouldCascade, e.extraFields)
 	if err == nil {
 		return resources, nil
@@ -320,22 +343,25 @@ func (e TableExecutor) resolveResourceValues(ctx context.Context, meta schema.Cl
 			stack := string(debug.Stack())
 			e.Logger.Error("resolve table recovered from panic", "table", e.Table.Name, "panic_msg", r, "stack", stack)
 			diags = fromError(fmt.Errorf("column resolve panic: %s", r), diag.WithResourceName(e.ResourceName), diag.WithSeverity(diag.PANIC),
-				diag.WithSummary("resolve table %q recovered from panic.", e.Table.Name), diag.WithDetails("%s", stack))
+				diag.WithSummary("resolve table %q recovered from panic", e.Table.Name), diag.WithDetails("%s", stack))
 		}
 	}()
-	if err := e.resolveColumns(ctx, meta, resource, e.columns[0]); err != nil {
-		return err
+
+	diags = diags.Add(e.resolveColumns(ctx, meta, resource, e.columns[0]))
+	if diags.HasErrors() {
+		return diags
 	}
+
 	// call PostRowResolver if defined after columns have been resolved
 	if e.Table.PostResourceResolver != nil {
 		if err := e.Table.PostResourceResolver(ctx, meta, resource); err != nil {
-			return e.handleResolveError(meta, resource, err, diag.WithSummary("post resource resolver failed for %q", e.Table.Name))
+			return diags.Add(e.handleResolveError(meta, resource, err, diag.WithSummary("post resource resolver failed for %q", e.Table.Name)))
 		}
 	}
 	// Finally, resolve columns internal to the SDK
 	for _, c := range e.columns[1] {
 		if err := c.Resolver(ctx, meta, resource, c); err != nil {
-			return fromError(err, diag.WithResourceName(e.ResourceName), WithResource(resource), diag.WithType(diag.INTERNAL), diag.WithSummary("default column %q resolver execution", c.Name))
+			return diags.Add(fromError(err, diag.WithResourceName(e.ResourceName), WithResource(resource), diag.WithType(diag.INTERNAL), diag.WithSummary("default column %q resolver execution", c.Name)))
 		}
 	}
 	return diags
@@ -343,6 +369,8 @@ func (e TableExecutor) resolveResourceValues(ctx context.Context, meta schema.Cl
 
 // resolveColumns resolves each column in the table and adds them to the resource.
 func (e TableExecutor) resolveColumns(ctx context.Context, meta schema.ClientMeta, resource *schema.Resource, cols []schema.Column) diag.Diagnostics {
+
+	var diags diag.Diagnostics
 	for _, c := range cols {
 		if c.Resolver != nil {
 			meta.Logger().Trace("using custom column resolver", "column", c.Name, "table", e.Table.Name)
@@ -352,20 +380,23 @@ func (e TableExecutor) resolveColumns(ctx context.Context, meta schema.ClientMet
 			}
 			// Not allowed ignoring PK resolver errors
 			if funk.ContainsString(e.Db.Dialect().PrimaryKeys(e.Table), c.Name) {
-				return ClassifyError(err, diag.WithResourceName(e.ResourceName), WithResource(resource), diag.WithSummary("failed to resolve column %s@%s", e.Table.Name, c.Name))
+				return diags.Add(ClassifyError(err, diag.WithResourceName(e.ResourceName), WithResource(resource), diag.WithSummary("failed to resolve column %s@%s", e.Table.Name, c.Name)))
 			}
 			// check if column resolver defined an IgnoreError function, if it does check if ignore should be ignored.
-			if c.IgnoreError == nil || !c.IgnoreError(err) {
-				return e.handleResolveError(meta, resource, err, diag.WithSummary("column resolver %q failed for table %q", c.Name, e.Table.Name))
+			if c.IgnoreError != nil && c.IgnoreError(err) {
+				diags = diags.Add(e.handleResolveError(meta, resource, err, diag.WithSeverity(diag.IGNORE), diag.WithSummary("column resolver %q failed for table %q", c.Name, e.Table.Name)))
+			} else {
+				diags = diags.Add(e.handleResolveError(meta, resource, err, diag.WithSummary("column resolver %q failed for table %q", c.Name, e.Table.Name)))
 			}
+
 			// TODO: double check logic here
 			if reflect2.IsNil(c.Default) {
 				continue
 			}
 			// Set default value if defined, otherwise it will be nil
 			if err := resource.Set(c.Name, c.Default); err != nil {
-				return fromError(err, diag.WithResourceName(e.ResourceName), diag.WithType(diag.INTERNAL),
-					diag.WithSummary("failed to set resource default value for %s@%s", e.Table.Name, c.Name))
+				diags = diags.Add(fromError(err, diag.WithResourceName(e.ResourceName), diag.WithType(diag.INTERNAL),
+					diag.WithSummary("failed to set resource default value for %s@%s", e.Table.Name, c.Name)))
 			}
 			continue
 		}
@@ -378,11 +409,11 @@ func (e TableExecutor) resolveColumns(ctx context.Context, meta schema.ClientMet
 		}
 		meta.Logger().Trace("setting column value", "column", c.Name, "value", v, "table", e.Table.Name)
 		if err := resource.Set(c.Name, v); err != nil {
-			return fromError(err, diag.WithResourceName(e.ResourceName), diag.WithType(diag.INTERNAL),
-				diag.WithSummary("failed to set resource value for column %s@%s", e.Table.Name, c.Name))
+			diags = diags.Add(fromError(err, diag.WithResourceName(e.ResourceName), diag.WithType(diag.INTERNAL),
+				diag.WithSummary("failed to set resource value for column %s@%s", e.Table.Name, c.Name)))
 		}
 	}
-	return nil
+	return diags
 }
 
 // handleResolveError handles errors returned by user defined functions, using the ErrorClassifiers if defined.
@@ -390,7 +421,7 @@ func (e TableExecutor) handleResolveError(meta schema.ClientMeta, r *schema.Reso
 	errAsDiags := fromError(err, append(opts,
 		diag.WithResourceName(e.ResourceName),
 		WithResource(r),
-		diag.WithSeverity(diag.ERROR),
+		diag.WithOptionalSeverity(diag.ERROR),
 		diag.WithType(diag.RESOLVING),
 		diag.WithSummary("failed to resolve table %q", e.Table.Name),
 	)...)
