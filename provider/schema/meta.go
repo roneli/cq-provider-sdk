@@ -13,10 +13,16 @@ type ClientMeta interface {
 	Logger() hclog.Logger
 }
 
+type ClientIdentifier interface {
+	Identify() string
+}
+
 type Meta struct {
 	LastUpdate time.Time `json:"last_updated"`
 	FetchId    string    `json:"fetch_id,omitempty"`
 }
+
+const FetchIdMetaKey = "cq_fetch_id"
 
 var (
 	cqMeta = Column{
@@ -27,7 +33,7 @@ var (
 			mi := Meta{
 				LastUpdate: time.Now().UTC(),
 			}
-			if val, ok := resource.GetMeta("cq_fetch_id"); ok {
+			if val, ok := resource.GetMeta(FetchIdMetaKey); ok {
 				if s, ok := val.(string); ok {
 					mi.FetchId = s
 				}
@@ -45,9 +51,9 @@ var (
 			if err := resource.GenerateCQId(); err != nil {
 				if resource.Parent == nil {
 					return err
-				} else {
-					meta.Logger().Debug("one of the table pk is nil", "table", resource.table.Name)
 				}
+
+				meta.Logger().Debug("one of the table pk is nil", "table", resource.table.Name)
 			}
 			return resource.Set(c.Name, resource.Id())
 		},

@@ -11,6 +11,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### :spider: Fixed
 -->
 
+### [0.10.5](https://github.com/cloudquery/cq-provider-sdk/compare/v0.10.4...v0.10.5) (2022-05-31)
+
+
+### Bug Fixes
+
+* **deps:** Update hashstructure ([#293](https://github.com/cloudquery/cq-provider-sdk/issues/293)) ([3deb3ab](https://github.com/cloudquery/cq-provider-sdk/commit/3deb3abd956bb217c795d1d3e0a08920f7682220))
+* Null cq_id error ([#295](https://github.com/cloudquery/cq-provider-sdk/issues/295)) ([b41a56c](https://github.com/cloudquery/cq-provider-sdk/commit/b41a56ca781ae4560fad0ff0042d2d409af1e545))
+
+### [0.10.4](https://github.com/cloudquery/cq-provider-sdk/compare/v0.10.3...v0.10.4) (2022-05-29)
+
+
+### Features
+
+* **stats:** Add heartbeat ([#237](https://github.com/cloudquery/cq-provider-sdk/issues/237)) ([e0f10e7](https://github.com/cloudquery/cq-provider-sdk/commit/e0f10e75669e390d3d93d9f6488fa7a1ad562b70))
+
+### [0.10.3](https://github.com/cloudquery/cq-provider-sdk/compare/v0.10.2...v0.10.3) (2022-05-26)
+
+
+### Features
+
+* Implement Diagnostics.BySeverity filtering ([#288](https://github.com/cloudquery/cq-provider-sdk/issues/288)) ([75213de](https://github.com/cloudquery/cq-provider-sdk/commit/75213de41aceaa6607b479e822c18b8961772c5b))
+* Sortable flatdiags ([#290](https://github.com/cloudquery/cq-provider-sdk/issues/290)) ([22a7afb](https://github.com/cloudquery/cq-provider-sdk/commit/22a7afb218b536da6f8d3844c6b8bacde4478329))
+
+### [0.10.2](https://github.com/cloudquery/cq-provider-sdk/compare/v0.10.1...v0.10.2) (2022-05-25)
+
+
+### Bug Fixes
+
+* **testing:** Don't add ignored diagnostics to errors validation ([#283](https://github.com/cloudquery/cq-provider-sdk/issues/283)) ([370da1e](https://github.com/cloudquery/cq-provider-sdk/commit/370da1e8699b5da4920409c4029ec1e617ec3c86))
+
+### [0.10.1](https://github.com/cloudquery/cq-provider-sdk/compare/v0.10.0...v0.10.1) (2022-05-24)
+
+
+### Bug Fixes
+
+* Upgrade cqproto protocol to v5 ([#285](https://github.com/cloudquery/cq-provider-sdk/issues/285)) ([7d14f65](https://github.com/cloudquery/cq-provider-sdk/commit/7d14f658aa06343be6726df831f398a2870c9353))
+
+## [0.10.0](https://github.com/cloudquery/cq-provider-sdk/compare/v0.9.5...v0.10.0) (2022-05-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* Migrations removal (#262)
+
+### Features
+
+* Migrations removal ([#262](https://github.com/cloudquery/cq-provider-sdk/issues/262)) ([82b8981](https://github.com/cloudquery/cq-provider-sdk/commit/82b8981c8757a4129dda1a1ae7abed65f1f2dc67))
+
+### [0.9.5](https://github.com/cloudquery/cq-provider-sdk/compare/v0.9.4...v0.9.5) (2022-05-23)
+
+
+### Bug Fixes
+
+* Delete by cq_id before insertion ([#266](https://github.com/cloudquery/cq-provider-sdk/issues/266)) ([1f74be7](https://github.com/cloudquery/cq-provider-sdk/commit/1f74be7ade47872c3c9772059f651ac0c48ff8e5))
+* Executor fixes ([#265](https://github.com/cloudquery/cq-provider-sdk/issues/265)) ([79f98ce](https://github.com/cloudquery/cq-provider-sdk/commit/79f98cef89e7c0c69dd29f746b3510fe03f99f60))
+
+### [0.9.4](https://github.com/cloudquery/cq-provider-sdk/compare/v0.9.3...v0.9.4) (2022-05-17)
+
+
+### Bug Fixes
+
+* Added json marshaling for []*struct -> json ([#248](https://github.com/cloudquery/cq-provider-sdk/issues/248)) ([bcbc3fa](https://github.com/cloudquery/cq-provider-sdk/commit/bcbc3fa176ecee33c686f5b13a801a319e3948f7))
+* Calculate goroutines with ulimit ([#256](https://github.com/cloudquery/cq-provider-sdk/issues/256)) ([5753765](https://github.com/cloudquery/cq-provider-sdk/commit/575376554835a41ce0a94562b29da3247ff2378f))
+* **deps:** Update hashstructure ([#252](https://github.com/cloudquery/cq-provider-sdk/issues/252)) ([be60d74](https://github.com/cloudquery/cq-provider-sdk/commit/be60d7430a62f4b1d328c05b193ce55dd01c6fd1))
+* Int64 to int automatic conversion added ([#242](https://github.com/cloudquery/cq-provider-sdk/issues/242)) ([4c80f07](https://github.com/cloudquery/cq-provider-sdk/commit/4c80f07e45033f2537bb4995225f40ec5533f270))
+* Race condition ([#255](https://github.com/cloudquery/cq-provider-sdk/issues/255)) ([2f32536](https://github.com/cloudquery/cq-provider-sdk/commit/2f32536a5f6f60d330c5ede61304dccc98594a81))
+* Revert "fix(deps): Update hashstructure ([#252](https://github.com/cloudquery/cq-provider-sdk/issues/252))" ([#260](https://github.com/cloudquery/cq-provider-sdk/issues/260)) ([8534e24](https://github.com/cloudquery/cq-provider-sdk/commit/8534e24236e53fd4d34238775c2a4414d85f4a9d))
+* Use hashing FormatV1 ([#258](https://github.com/cloudquery/cq-provider-sdk/issues/258)) ([646daa5](https://github.com/cloudquery/cq-provider-sdk/commit/646daa57df21c5c06c498572f49d1c0294d6caf2))
+
 ## [v0.6.1] - 2022-01-03
 
 ### :gear: Changed

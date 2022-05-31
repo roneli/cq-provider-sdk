@@ -7,18 +7,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cloudquery/cq-provider-sdk/helpers"
+	"github.com/aws/smithy-go/ptr"
+	"github.com/cloudquery/cq-provider-sdk/helpers/limit"
 	"github.com/cloudquery/cq-provider-sdk/provider/diag"
 	"github.com/cloudquery/cq-provider-sdk/provider/schema"
 	"github.com/cloudquery/cq-provider-sdk/testlog"
-	"golang.org/x/sync/semaphore"
-
-	"github.com/aws/smithy-go/ptr"
 	"github.com/creasty/defaults"
 	"github.com/hashicorp/go-hclog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/semaphore"
 )
 
 type ExecutionTestCase struct {
@@ -36,8 +35,26 @@ type executionClient struct {
 	l hclog.Logger
 }
 
-func (e executionClient) Logger() hclog.Logger {
-	return e.l
+type zeroValuedStruct struct {
+	ZeroBool      bool   `default:"false"`
+	ZeroInt       int    `default:"0"`
+	NotZeroInt    int    `default:"5"`
+	NotZeroBool   bool   `default:"true"`
+	ZeroIntPtr    *int   `default:"0"`
+	NotZeroIntPtr *int   `default:"5"`
+	ZeroString    string `default:""`
+}
+
+type resolveColumnsTestCase struct {
+	Name         string
+	Table        *schema.Table
+	ResourceData interface{}
+	MetaData     map[string]interface{}
+
+	SetupStorage   func(t *testing.T) Storage
+	CompareValues  func(t *testing.T, r *schema.Resource, want []interface{})
+	ExpectedValues []interface{}
+	ExpectedDiags  []diag.FlatDiag
 }
 
 var (
@@ -79,6 +96,11 @@ var (
 			diag.NewBaseError(nil, diag.RESOLVING, diag.WithResourceName(resource.TableName()), diag.WithSummary("some error 2")),
 		}
 	}
+	postResourceResolverWarning = func(ctx context.Context, meta schema.ClientMeta, resource *schema.Resource) error {
+		return diag.Diagnostics{
+			diag.NewBaseError(nil, diag.RESOLVING, diag.WithResourceName(resource.TableName()), diag.WithSummary("some warning"), diag.WithSeverity(diag.WARNING)),
+		}
+	}
 
 	timeoutResolver = func(ctx context.Context, meta schema.ClientMeta, parent *schema.Resource, res chan<- interface{}) error {
 		select {
@@ -88,7 +110,44 @@ var (
 			panic("timeoutResolver timed out unexpectedly")
 		}
 	}
+	testZeroTable = &schema.Table{
+		Name: "test_zero_table",
+		Columns: []schema.Column{
+			{
+				Name: "zero_bool",
+				Type: schema.TypeBool,
+			},
+			{
+				Name: "zero_int",
+				Type: schema.TypeBigInt,
+			},
+			{
+				Name: "not_zero_bool",
+				Type: schema.TypeBool,
+			},
+			{
+				Name: "not_zero_int",
+				Type: schema.TypeBigInt,
+			},
+			{
+				Name: "zero_int_ptr",
+				Type: schema.TypeBigInt,
+			},
+			{
+				Name: "not_zero_int_ptr",
+				Type: schema.TypeBigInt,
+			},
+			{
+				Name: "zero_string",
+				Type: schema.TypeString,
+			},
+		},
+	}
 )
+
+func (e executionClient) Logger() hclog.Logger {
+	return e.l
+}
 
 func TestTableExecutor_Resolve(t *testing.T) {
 	testCases := []ExecutionTestCase{
@@ -412,6 +471,41 @@ func TestTableExecutor_Resolve(t *testing.T) {
 			},
 		},
 		{
+			Name: "post_resource_resolver_warning",
+			SetupStorage: func(t *testing.T) Storage {
+				db := new(DatabaseMock)
+				db.On("RemoveStaleData", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+				db.On("Dialect").Return(schema.PostgresDialect{})
+				db.On("CopyFrom", mock.Anything, mock.Anything, true, map[string]interface{}(nil)).Return(nil).Run(
+					func(args mock.Arguments) {
+						resources := args.Get(1).(schema.Resources)
+						if !assert.Greater(t, len(resources), 0) {
+							return
+						}
+
+						assert.NotNil(t, resources[0].Get("cq_id"))
+					})
+				return db
+			},
+			Table: &schema.Table{
+				Name:                 "post_resource_resolver_warning_table",
+				Resolver:             returnValueResolver,
+				Columns:              commonColumns,
+				PostResourceResolver: postResourceResolverWarning,
+			},
+			ExpectedResourceCount: 1,
+			ErrorExpected:         true,
+			ExpectedDiags: []diag.FlatDiag{
+				{
+					Err:      "some warning",
+					Resource: "post_resource_resolver_warning_table",
+					Severity: diag.WARNING,
+					Type:     diag.RESOLVING,
+					Summary:  "some warning",
+				},
+			},
+		},
+		{
 			Name: "failing_column",
 			SetupStorage: func(t *testing.T) Storage {
 				db := new(DatabaseMock)
@@ -462,10 +556,10 @@ func TestTableExecutor_Resolve(t *testing.T) {
 			ErrorExpected: true,
 			ExpectedDiags: []diag.FlatDiag{
 				{
-					Err:      `error at github.com/cloudquery/cq-provider-sdk/provider/execution.glob..func4[execution_test.go:58] some error`,
+					Err:      `error at github.com/cloudquery/cq-provider-sdk/provider/execution.glob..func4[execution_test.go:75] some error`,
 					Resource: "return_wrap_error",
 					Severity: diag.ERROR,
-					Summary:  `failed to resolve table "simple": error at github.com/cloudquery/cq-provider-sdk/provider/execution.glob..func4[execution_test.go:58] some error`,
+					Summary:  `failed to resolve table "simple": error at github.com/cloudquery/cq-provider-sdk/provider/execution.glob..func4[execution_test.go:75] some error`,
 					Type:     diag.RESOLVING,
 				},
 			},
@@ -488,6 +582,37 @@ func TestTableExecutor_Resolve(t *testing.T) {
 				},
 			},
 		},
+		{
+			Name: "panic_column",
+			Table: &schema.Table{
+				Name:     "panic_column_table",
+				Resolver: returnValueResolver,
+				Columns: schema.ColumnList{
+					{
+						Name: "name",
+						Resolver: func(ctx context.Context, meta schema.ClientMeta, resource *schema.Resource, c schema.Column) error {
+							return resource.Set(c.Name, "name_value")
+						},
+					},
+					{
+						Name: "tags",
+						Resolver: func(ctx context.Context, meta schema.ClientMeta, resource *schema.Resource, c schema.Column) error {
+							panic("oops")
+						},
+					},
+				},
+			},
+			ErrorExpected: true,
+			ExpectedDiags: []diag.FlatDiag{
+				{
+					Err:      "column resolve panic: oops",
+					Resource: "panic_column",
+					Severity: diag.PANIC,
+					Type:     diag.RESOLVING,
+					Summary:  `resolve column "tags" in table "panic_column_table" recovered from panic: column resolve panic: oops`,
+				},
+			},
+		},
 	}
 
 	executionClient := executionClient{testlog.New(t)}
@@ -497,7 +622,7 @@ func TestTableExecutor_Resolve(t *testing.T) {
 			if tc.SetupStorage != nil {
 				storage = tc.SetupStorage(t)
 			}
-			limiter := semaphore.NewWeighted(int64(helpers.GetMaxGoRoutines()))
+			limiter := semaphore.NewWeighted(int64(limit.GetMaxGoRoutines()))
 			exec := NewTableExecutor(tc.Name, storage, testlog.New(t), tc.Table, tc.ExtraFields, nil, nil, limiter, 10*time.Second)
 			count, diags := exec.Resolve(context.Background(), executionClient)
 			assert.Equal(t, tc.ExpectedResourceCount, count)
@@ -513,64 +638,7 @@ func TestTableExecutor_Resolve(t *testing.T) {
 	}
 }
 
-var testZeroTable = &schema.Table{
-	Name: "test_zero_table",
-	Columns: []schema.Column{
-		{
-			Name: "zero_bool",
-			Type: schema.TypeBool,
-		},
-		{
-			Name: "zero_int",
-			Type: schema.TypeBigInt,
-		},
-		{
-			Name: "not_zero_bool",
-			Type: schema.TypeBool,
-		},
-		{
-			Name: "not_zero_int",
-			Type: schema.TypeBigInt,
-		},
-		{
-			Name: "zero_int_ptr",
-			Type: schema.TypeBigInt,
-		},
-		{
-			Name: "not_zero_int_ptr",
-			Type: schema.TypeBigInt,
-		},
-		{
-			Name: "zero_string",
-			Type: schema.TypeString,
-		},
-	},
-}
-
-type zeroValuedStruct struct {
-	ZeroBool      bool   `default:"false"`
-	ZeroInt       int    `default:"0"`
-	NotZeroInt    int    `default:"5"`
-	NotZeroBool   bool   `default:"true"`
-	ZeroIntPtr    *int   `default:"0"`
-	NotZeroIntPtr *int   `default:"5"`
-	ZeroString    string `default:""`
-}
-
-type resolveColumnsTestCase struct {
-	Name         string
-	Table        *schema.Table
-	ResourceData interface{}
-	MetaData     map[string]interface{}
-
-	SetupStorage   func(t *testing.T) Storage
-	CompareValues  func(t *testing.T, r *schema.Resource, want []interface{})
-	ExpectedValues []interface{}
-	ExpectedDiags  []diag.FlatDiag
-}
-
 func TestTableExecutor_resolveResourceValues(t *testing.T) {
-
 	testCases := []resolveColumnsTestCase{
 		{
 			Name:  "resolve all zeroed columns",
@@ -616,12 +684,13 @@ func TestTableExecutor_resolveResourceValues(t *testing.T) {
 			if tc.SetupStorage != nil {
 				storage = tc.SetupStorage(t)
 			}
-			limiter := semaphore.NewWeighted(int64(helpers.GetMaxGoRoutines()))
+			limiter := semaphore.NewWeighted(int64(limit.GetMaxGoRoutines()))
 			exec := NewTableExecutor(tc.Name, storage, testlog.New(t), tc.Table, nil, nil, nil, limiter, 0)
 
 			r := schema.NewResourceData(storage.Dialect(), tc.Table, nil, tc.ResourceData, tc.MetaData, exec.executionStart)
 			// columns should be resolved from ColumnResolver functions or default functions
-			diags := exec.resolveResourceValues(context.Background(), executionClient{testlog.New(t)}, r)
+			cl := executionClient{testlog.New(t)}
+			diags := exec.resolveResourceValues(context.Background(), cl, r)
 			if tc.ExpectedDiags != nil {
 				require.True(t, diags.HasDiags())
 				if tc.ExpectedDiags != nil {
@@ -637,7 +706,6 @@ func TestTableExecutor_resolveResourceValues(t *testing.T) {
 				assert.Equal(t, tc.ExpectedValues, v)
 				assert.Nil(t, err)
 			}
-
 		})
 	}
 }

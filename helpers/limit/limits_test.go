@@ -1,4 +1,4 @@
-package helpers
+package limit
 
 import (
 	"testing"
@@ -7,7 +7,6 @@ import (
 )
 
 func TestCalculateGoRoutines(t *testing.T) {
-
 	cases := []struct {
 		Name       string
 		Memory     uint64

@@ -2,28 +2,25 @@ package provider
 
 import (
 	"context"
-	"embed"
 	"fmt"
 	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
 
+	"github.com/cloudquery/cq-provider-sdk/cqproto"
 	"github.com/cloudquery/cq-provider-sdk/database"
-	"github.com/cloudquery/cq-provider-sdk/migration/migrator"
+	"github.com/cloudquery/cq-provider-sdk/helpers"
+	"github.com/cloudquery/cq-provider-sdk/helpers/limit"
 	"github.com/cloudquery/cq-provider-sdk/provider/diag"
 	"github.com/cloudquery/cq-provider-sdk/provider/execution"
 	"github.com/cloudquery/cq-provider-sdk/provider/module"
-	"github.com/thoas/go-funk"
-
-	"github.com/cloudquery/cq-provider-sdk/cqproto"
-	"github.com/cloudquery/cq-provider-sdk/helpers"
 	"github.com/cloudquery/cq-provider-sdk/provider/schema"
-
 	"github.com/creasty/defaults"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/hcl/v2/hclsimple"
 	"github.com/hashicorp/hcl/v2/hclwrite"
+	"github.com/thoas/go-funk"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 )
@@ -48,8 +45,6 @@ type Provider struct {
 	Config func() Config
 	// Logger to call, this logger is passed to the serve.Serve Client, if not define Serve will create one instead.
 	Logger hclog.Logger
-	// Migrations embedded and passed by the provider to upgrade between versions
-	Migrations embed.FS
 	// ErrorClassifier allows the provider to classify errors it produces during table execution, and return them as diagnostics to the user.
 	// Classifier function may return empty slice if it cannot meaningfully convert the error into diagnostics. In this case
 	// the error will be converted by the SDK into diagnostic at ERROR level and RESOLVING type.
@@ -66,16 +61,13 @@ type Provider struct {
 	storageCreator func(ctx context.Context, logger hclog.Logger, dbURL string) (execution.Storage, error)
 }
 
+var _ cqproto.CQProviderServer = (*Provider)(nil)
+
 func (p *Provider) GetProviderSchema(_ context.Context, _ *cqproto.GetProviderSchemaRequest) (*cqproto.GetProviderSchemaResponse, error) {
-	m, err := migrator.ReadMigrationFiles(p.Logger, p.Migrations)
-	if err != nil {
-		return nil, err
-	}
 	return &cqproto.GetProviderSchemaResponse{
 		Name:           p.Name,
 		Version:        p.Version,
 		ResourceTables: p.ResourceMap,
-		Migrations:     m,
 	}, nil
 }
 
@@ -189,7 +181,7 @@ func (p *Provider) FetchResources(ctx context.Context, request *cqproto.FetchRes
 	var goroutinesSem *semaphore.Weighted
 	maxGoroutines := request.MaxGoroutines
 	if maxGoroutines == 0 {
-		maxGoroutines = helpers.GetMaxGoRoutines()
+		maxGoroutines = limit.GetMaxGoRoutines()
 	}
 	goroutinesSem = semaphore.NewWeighted(helpers.Uint64ToInt64(maxGoroutines))
 
@@ -203,13 +195,13 @@ func (p *Provider) FetchResources(ctx context.Context, request *cqproto.FetchRes
 	g, gctx := errgroup.WithContext(ctx)
 	finishedResources := make(map[string]bool, len(resources))
 	l := &sync.Mutex{}
-	var totalResourceCount uint64 = 0
+	var totalResourceCount uint64
 	for _, resource := range resources {
 		table, ok := p.ResourceMap[resource]
 		if !ok {
 			return fmt.Errorf("plugin %s does not provide resource %s", p.Name, resource)
 		}
-		tableExec := execution.NewTableExecutor(resource, conn, p.Logger, table, p.extraFields, request.Metadata, p.ErrorClassifier, goroutinesSem, request.Timeout)
+		tableExec := execution.NewTableExecutor(resource, conn, p.Logger.With("table", table.Name), table, p.extraFields, request.Metadata, p.ErrorClassifier, goroutinesSem, request.Timeout)
 		p.Logger.Debug("fetching table...", "provider", p.Name, "table", table.Name)
 		// Save resource aside
 		r := resource
@@ -271,8 +263,6 @@ func (p *Provider) GetModuleInfo(_ context.Context, request *cqproto.GetModuleRe
 		Diagnostics:       diag.FromError(err, diag.INTERNAL),
 	}, nil
 }
-
-var _ cqproto.CQProviderServer = (*Provider)(nil)
 
 func (p *Provider) interpolateAllResources(requestedResources []string) ([]string, error) {
 	if len(requestedResources) != 1 {

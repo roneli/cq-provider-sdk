@@ -7,19 +7,28 @@ on:
   pull_request:
     branches:
       - main
-    paths-ignore:
-      - 'terraform/**'
-      - '.github/**'
-      - 'scripts/**'
 
 jobs:
   golangci:
     name: Lint with GolangCI
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v2
+      - uses: actions/checkout@v3
+      - uses: dorny/paths-filter@v2
+        id: changes
         with:
-          version: v1.45.2
-          args: --timeout 5m
+          filters: |
+            src:
+              - '!(terraform/**/*|scripts/**/*)'
+
+      - uses: actions/setup-go@v3
+        if: steps.changes.outputs.src == 'true' || github.event_name != 'pull_request'
+        with:
+          go-version: 1.17
+
+      - name: golangci-lint
+        if: steps.changes.outputs.src == 'true' || github.event_name != 'pull_request'
+        uses: golangci/golangci-lint-action@v3
+        with:
+          version: v1.46.1
+          args: --timeout 10m --verbose
