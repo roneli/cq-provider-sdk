@@ -11,6 +11,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### :spider: Fixed
 -->
 
+## [0.10.10](https://github.com/cloudquery/cq-provider-sdk/compare/v0.10.9...v0.10.10) (2022-06-07)
+
+
+### Features
+
+* Always use BigInt ([#321](https://github.com/cloudquery/cq-provider-sdk/issues/321)) ([2033349](https://github.com/cloudquery/cq-provider-sdk/commit/2033349d3dfa07035ad3c37acba23e285a49c172))
+
+## [0.10.9](https://github.com/cloudquery/cq-provider-sdk/compare/v0.10.8...v0.10.9) (2022-06-07)
+
+
+### Bug Fixes
+
+* Add missing SkipIgnoreInTest ([#319](https://github.com/cloudquery/cq-provider-sdk/issues/319)) ([b088a33](https://github.com/cloudquery/cq-provider-sdk/commit/b088a33aa119fd428f74bb86c83527e2a5d9eb8c))
+
+## [0.10.8](https://github.com/cloudquery/cq-provider-sdk/compare/v0.10.7...v0.10.8) (2022-06-07)
+
+
+### Bug Fixes
+
+* Respect Multiplexer No Clients ([#313](https://github.com/cloudquery/cq-provider-sdk/issues/313)) ([c873426](https://github.com/cloudquery/cq-provider-sdk/commit/c8734261bb8c081e6f73415663f90a750e93100e))
+
+### [0.10.7](https://github.com/cloudquery/cq-provider-sdk/compare/v0.10.6...v0.10.7) (2022-06-01)
+
+
+### Features
+
+* Add TestView helper function ([#305](https://github.com/cloudquery/cq-provider-sdk/issues/305)) ([c4381f5](https://github.com/cloudquery/cq-provider-sdk/commit/c4381f5bb97b4ed5d6dda0d60a4037f195d08dfe))
+
+### [0.10.6](https://github.com/cloudquery/cq-provider-sdk/compare/v0.10.5...v0.10.6) (2022-06-01)
+
+
+### Features
+
+* Return full rlimit ([#301](https://github.com/cloudquery/cq-provider-sdk/issues/301)) ([99b8c5e](https://github.com/cloudquery/cq-provider-sdk/commit/99b8c5e1bf961a34055e96784bd926e96b666c4d))
+
 ### [0.10.5](https://github.com/cloudquery/cq-provider-sdk/compare/v0.10.4...v0.10.5) (2022-05-31)
 
 
